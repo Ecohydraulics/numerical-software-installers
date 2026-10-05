@@ -24,6 +24,12 @@ TELEMAC-MASCARET (+ optional SALOME) installer for Ubuntu 24.04 (noble) and Linu
 
 - `install-delft3d-flow-native.sh` - native (non-Docker) build attempt for Delft3D-FLOW / the Delft3D 4 suite on Ubuntu or Linux Mint. Deltares officially supports Linux builds through an AlmaLinux/oneAPI container; this script tries to reproduce enough of that environment on an apt-based host. Supports options such as `--config flow2d3d`, `--tag`, `--prefix`, `--skip-oneapi-install`, and `--no-apt`.
 
+
+### `OpenFOAM-installer/`
+
+- `install_openfoam.sh` - autoinstaller for OpenFOAM v2406, including Nils Reidar Olsen's [sediDriftFoam](https://www.pvv.ntnu.no/~nilsol/sediDriftFoam/) (see [Olsen et al. 2023](https://doi.org/10.2166/hydro.2023.309)) and [sediDriftFoam2](https://www.pvv.ntnu.no/~nilsol/sediDriftFoam2) (see [Olsen 2025](https://doi.org/10.2166/hydro.2025.059)) codes, and [BAW's stage-discharge relation](https://github.com/baw-de/HydBCsForOF) outflow condition (see also [Thorenz 2024](https://doi.org/10.3929/ethz-b-000675949))
+
+
 ### `reef3d-installer/`
 
 - `install_reef3d.sh` - auto-installer for REEF3D and DIVEMesh on Debian-family Linux systems.
