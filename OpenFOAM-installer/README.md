@@ -21,7 +21,7 @@ Use `--dry-run` / `-DryRun` to preview; `--jobs 4` / `-Jobs 4` limits compilatio
 
 The installer uses `apt-get`, the backward-compatible interface recommended for scripts; `apt` is intended for interactive use. [Debian APT manual](https://manpages.debian.org/bookworm/apt/apt.8.en.html#SCRIPT_USAGE_AND_DIFFERENCES_FROM_OTHER_APT_TOOLS).
 
-Earlier archive and shell-startup failures (`jouleHeatingSource:V`, `/bin/bash: cannot execute binary file`, `pop_var_context`) are corrected. Retry in a new `--prefix`; add `--source-cache /path/to/failed-prefix/cache` to reuse checksum-verified core archives without modifying the failed installation. Windows equivalents: `-Prefix` and `-SourceCache`, both with Linux paths. [Recovery and diagnostics](docs/RECOVERY.md).
+Earlier archive and shell-startup failures (`jouleHeatingSource:V`, `/bin/bash: cannot execute binary file`, `pop_var_context`) are corrected. Retry in a new `--prefix` (Windows: `-Prefix`, using a Linux path). No previous cache is required; the installer downloads its own archives. Cache reuse is optional and requires a verified existing directory. [Recovery and diagnostics](docs/RECOVERY.md).
 
 ## Run and visualize
 

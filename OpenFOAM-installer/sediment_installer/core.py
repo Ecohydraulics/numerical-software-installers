@@ -11,6 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 
@@ -99,10 +100,30 @@ def checked_download(url: str, expected_sha256: str, destination: Path) -> Path:
     temporary = Path(temp_name)
     digest = hashlib.sha256()
     try:
-        request = urllib.request.Request(url, headers={"User-Agent": "openfoam-sediment-installer/1"})
+        request = urllib.request.Request(url, headers={
+            "User-Agent": "openfoam-sediment-installer/1", "Accept-Encoding": "identity"})
         with os.fdopen(fd, "wb") as out, urllib.request.urlopen(request, timeout=120) as response:
             if not response.geturl().startswith("https://"):
                 raise InstallError("Refusing redirect to non-HTTPS download")
+            # SourceForge redirects may contain expiring tokens. Report the mirror
+            # path without query/fragment data, not its signed download URL.
+            final_url = urllib.parse.urlsplit(response.geturl())
+            location = urllib.parse.urlunsplit((final_url.scheme, final_url.netloc,
+                                               final_url.path, "", ""))
+            if response.status != 200:
+                raise InstallError(f"Unexpected download HTTP status {response.status}: {location}; "
+                                   "a complete HTTP 200 response is required")
+            content_type = response.headers.get("Content-Type", "unknown").split(";", 1)[0].strip().lower()
+            if content_type in {"text/html", "application/xhtml+xml"}:
+                raise InstallError(f"Unexpected HTML download response: {location}; "
+                                   "expected the pinned file, not a download/error page")
+            content_length = response.headers.get("Content-Length")
+            try:
+                expected_bytes = int(content_length) if content_length is not None else None
+                if expected_bytes is not None and expected_bytes < 0:
+                    raise ValueError
+            except ValueError as error:
+                raise InstallError(f"Invalid download Content-Length: {location}") from error
             last_report = time.monotonic()
             total = 0
             while True:
@@ -115,8 +136,17 @@ def checked_download(url: str, expected_sha256: str, destination: Path) -> Path:
                 if time.monotonic() - last_report > 15:
                     print(f"Downloading {destination.name}: {total // (1024 * 1024)} MiB", flush=True)
                     last_report = time.monotonic()
+        details = (f"\n  Expected SHA256: {expected_sha256.lower()}"
+                   f"\n  Received SHA256: {digest.hexdigest()}"
+                   f"\n  Received bytes: {total}"
+                   f"\n  Content-Type: {content_type}"
+                   f"\n  Download location: {location}")
+        if expected_bytes is not None and total != expected_bytes:
+            raise InstallError(f"Incomplete download: received {total} of {expected_bytes} bytes; "
+                               "rejecting unverified download" + details)
         if digest.hexdigest() != expected_sha256.lower():
-            raise InstallError(f"Upstream checksum mismatch: {url}; source/release may have changed")
+            raise InstallError("Upstream checksum mismatch: received bytes do not match the pinned file; "
+                               "rejecting unverified download" + details)
         if destination.exists():
             raise InstallError(f"Cache file appeared concurrently: {destination}")
         temporary.rename(destination)

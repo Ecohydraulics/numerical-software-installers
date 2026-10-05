@@ -45,6 +45,24 @@ class SourceCacheTests(unittest.TestCase):
         for root, body in self.payloads.items():
             (self.cache / (root + ".tgz")).write_bytes(body)
 
+    def test_default_install_needs_no_previous_cache(self):
+        def download(url, digest, destination):
+            root = destination.name.removesuffix(".tgz")
+            self.assertEqual(destination, self.prefix / "cache" / (root + ".tgz"))
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(self.payloads[root])
+            return destination
+
+        # The standard command has no --source-cache argument. Neither an old
+        # installation nor an existing download directory is required.
+        args = installer.parser().parse_args(["--prefix", str(self.prefix)])
+        self.assertIsNone(args.source_cache)
+        with mock.patch.object(installer, "checked_download", side_effect=download) as mocked:
+            bashrc = installer.acquire_core(self.prefix, args.source_cache)
+        self.assertEqual(mocked.call_count, 2)
+        self.assertTrue(bashrc.is_file())
+        self.assertEqual(list(self.cache.iterdir()), [])
+
     def test_verified_cache_is_read_only_and_sources_are_extracted_fresh(self):
         self.populate_cache()
         before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.cache.iterdir()}

@@ -6,6 +6,8 @@ wmake/ scripts (not compiler rules, which contain NTFS case-colliding names).
 No network or operating-system installation is performed. On Windows also set
 SEDIMENT_TEST_BASH to GNU Git's usr/bin/sh.exe; WSL's bash.exe shim is not used.
 SEDIMENT_TEST_TMPDIR can select an existing, whitespace-free temporary parent.
+For bundled Git Bash's wmake directory checks, choose a parent outside Windows
+TEMP: that runtime aliases TEMP as /tmp, confusing upstream path comparisons.
 
 These tests exercise the ACTUAL v2406 configuration chain, including CGAL's
 intentional return-1 optional-library probes. Missing MPI tools are substituted
@@ -25,6 +27,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -187,6 +190,73 @@ printf 'arg=<%s>\n' "$@"
             [line for line in result.stdout.splitlines() if line.startswith("arg=<")],
             [f"arg=<{value}>" for value in self.payload],
         )
+
+    def test_production_build_wrapper_initializes_real_release(self):
+        # Run the exact production command script, including compiler/MPI
+        # exports and project/API/ABI gates. Only the host executable and two
+        # fixture paths are adapted for GNU Git Bash on Windows.
+        with mock.patch.object(installer, "capture", return_value="not executed") as captured:
+            installer.foam_command(
+                self.bashrc, self.base / "stack",
+                ["/usr/bin/printf", "arg=<%s>\\n", *self.payload], 2,
+                capture_output=True,
+            )
+        command = list(captured.call_args.args[0])
+        command[0] = BASH
+        command[4] = self.prelude() + command[4]
+        command[6] = shell_path(self.bashrc)
+        command[7] = shell_path(self.base / "stack")
+        environment = self.environment()
+        environment.pop("FOAM_CONFIG_MODE")  # The production prelude must set it.
+        result = subprocess.run(
+            command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, f"Production v2406 wrapper failed:\n{result.stderr[-12000:]}")
+        self.assertNotIn("pop_var_context", result.stderr)
+        self.assertEqual(
+            [line for line in result.stdout.splitlines() if line.startswith("arg=<")],
+            [f"arg=<{value}>" for value in self.payload],
+        )
+
+    def test_production_wrapper_preserves_cwd_for_stock_wmake_directory_checks(self):
+        # No libraries or tools are compiled. src is an empty directory fixture;
+        # the untouched stock wmake/check-dir scripts test directory identity.
+        if os.name == "nt" and self.base.is_relative_to(Path(tempfile.gettempdir()).resolve()):
+            self.skipTest("Git Bash TEMP has a /tmp mount alias; set SEDIMENT_TEST_TMPDIR outside TEMP")
+        source = self.project / "src"
+        source.mkdir(exist_ok=True)
+        for current in (self.project, source):
+            with self.subTest(cwd=current.name):
+                payload = ["wmake", "-check-dir", shell_path(current)]
+                if os.name == "nt":
+                    # This bundled Git runtime has GNU Bash as usr/bin/sh.exe,
+                    # but no /bin/bash shebang target. Execute the unchanged
+                    # wmake script explicitly; native Linux uses PATH/shebang.
+                    payload = [shell_path(Path(BASH)), shell_path(self.project / "wmake/wmake"),
+                               "-check-dir", shell_path(current)]
+                with mock.patch.object(installer, "capture", return_value="not executed") as captured:
+                    installer.foam_command(
+                        self.bashrc, self.base / "stack",
+                        payload, 2,
+                        cwd=current, capture_output=True,
+                    )
+                command = list(captured.call_args.args[0])
+                command[0] = BASH
+                command[4] = self.prelude() + 'printf "cwd-before=<%s>\\n" "$(pwd -P)" >&2\n' + command[4]
+                command[4] = command[4].replace(
+                    'exec "$@"',
+                    'printf "cwd-after=<%s> PWD=<%s>\\n" "$(pwd -P)" "$PWD" >&2\nexec "$@"',
+                )
+                command[6] = shell_path(self.bashrc)
+                command[7] = shell_path(self.base / "stack")
+                result = subprocess.run(
+                    command, cwd=current, env=self.environment(),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    encoding="utf-8", errors="replace", timeout=30,
+                )
+                self.assertEqual(result.returncode, 0,
+                                 "stdout:\n" + result.stdout[-12000:] + "\nstderr:\n" + result.stderr[-12000:])
 
 
 if __name__ == "__main__":

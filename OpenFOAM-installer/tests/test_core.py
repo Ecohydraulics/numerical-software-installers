@@ -25,12 +25,24 @@ OPENFOAM_COLON_MEMBER = (
 
 
 class DownloadResponse(io.BytesIO):
-    def __init__(self, body=b"fixture", url="https://example.invalid/file"):
+    def __init__(self, body=b"fixture", url="https://example.invalid/file", *,
+                 status=200, headers=None):
         super().__init__(body)
         self.url = url
+        self.status = status
+        self.headers = {"Content-Length": str(len(body)),
+                        "Content-Type": "application/octet-stream"}
+        for name, value in (headers or {}).items():
+            if value is None:
+                self.headers.pop(name, None)
+            else:
+                self.headers[name] = value
 
     def geturl(self):
         return self.url
+
+    def getcode(self):
+        return self.status
 
 
 def make_archive(path, entries):
@@ -93,6 +105,85 @@ class DownloadTests(unittest.TestCase):
                                return_value=DownloadResponse(b"changed upstream")):
             with self.assertRaisesRegex(core.InstallError, "Upstream checksum mismatch"):
                 core.checked_download("https://example.invalid/file", self.digest, self.target)
+        self.assertFalse(self.target.exists())
+        self.assertEqual(list(self.target.parent.iterdir()), [])
+
+    def test_checksum_failure_reports_received_content_without_url_tokens(self):
+        changed = b"complete but not the pinned archive"
+        received_digest = hashlib.sha256(changed).hexdigest()
+        final_url = "https://mirror.invalid/releases/file.tgz?token=private-query#private-fragment"
+        with mock.patch.object(core.urllib.request, "urlopen",
+                               return_value=DownloadResponse(changed, final_url)):
+            with self.assertRaisesRegex(core.InstallError, "Upstream checksum mismatch") as caught:
+                core.checked_download("https://example.invalid/file", self.digest, self.target)
+        error = str(caught.exception)
+        self.assertIn(self.digest, error)
+        self.assertIn(received_digest, error)
+        self.assertIn(str(len(changed)), error)
+        self.assertIn("application/octet-stream", error)
+        self.assertIn("https://mirror.invalid/releases/file.tgz", error)
+        self.assertNotIn("private-query", error)
+        self.assertNotIn("private-fragment", error)
+        self.assertFalse(self.target.exists())
+        self.assertEqual(list(self.target.parent.iterdir()), [])
+
+    def test_short_body_is_reported_as_incomplete_not_changed_upstream(self):
+        expected_bytes = len(self.body) + 20
+        with mock.patch.object(core.urllib.request, "urlopen", return_value=DownloadResponse(
+                self.body, headers={"Content-Length": str(expected_bytes)})):
+            with self.assertRaisesRegex(core.InstallError, "Incomplete download") as caught:
+                core.checked_download("https://example.invalid/file", self.digest, self.target)
+        self.assertIn(str(len(self.body)), str(caught.exception))
+        self.assertIn(str(expected_bytes), str(caught.exception))
+        self.assertNotIn("Upstream checksum mismatch", str(caught.exception))
+        self.assertFalse(self.target.exists())
+        self.assertEqual(list(self.target.parent.iterdir()), [])
+
+    def test_partial_http_response_is_rejected_even_when_digest_matches(self):
+        with mock.patch.object(core.urllib.request, "urlopen",
+                               return_value=DownloadResponse(self.body, status=206)):
+            with self.assertRaisesRegex(core.InstallError, "HTTP.*206"):
+                core.checked_download("https://example.invalid/file", self.digest, self.target)
+        self.assertFalse(self.target.exists())
+        self.assertEqual(list(self.target.parent.iterdir()), [])
+
+    def test_html_response_is_rejected_even_when_digest_matches(self):
+        for response_type in ("text/html; charset=utf-8", "application/xhtml+xml"):
+            with self.subTest(response_type=response_type):
+                with mock.patch.object(core.urllib.request, "urlopen", return_value=DownloadResponse(
+                        self.body, headers={"Content-Type": response_type})):
+                    with self.assertRaisesRegex(core.InstallError, "(?i)unexpected HTML download response"):
+                        core.checked_download("https://example.invalid/file", self.digest, self.target)
+                self.assertFalse(self.target.exists())
+                self.assertEqual(list(self.target.parent.iterdir()), [])
+
+    def test_missing_content_length_is_accepted_when_digest_matches(self):
+        with mock.patch.object(core.urllib.request, "urlopen", return_value=DownloadResponse(
+                self.body, headers={"Content-Length": None})):
+            result = core.checked_download("https://example.invalid/file", self.digest, self.target)
+        self.assertEqual(result.read_bytes(), self.body)
+        self.assertEqual(list(self.target.parent.glob("*.part-*")), [])
+
+    def test_invalid_content_length_is_rejected(self):
+        for header in ("not-a-number", "-1"):
+            with self.subTest(header=header):
+                with mock.patch.object(core.urllib.request, "urlopen", return_value=DownloadResponse(
+                        self.body, headers={"Content-Length": header})):
+                    with self.assertRaisesRegex(core.InstallError, "(?i)invalid.*Content-Length"):
+                        core.checked_download("https://example.invalid/file", self.digest, self.target)
+                self.assertFalse(self.target.exists())
+                self.assertEqual(list(self.target.parent.iterdir()), [])
+
+    def test_html_failure_redacts_requested_and_final_url_tokens(self):
+        requested_url = "https://example.invalid/file?auth=private-request#private-request-fragment"
+        final_url = "https://mirror.invalid/file?token=private-response#private-response-fragment"
+        with mock.patch.object(core.urllib.request, "urlopen", return_value=DownloadResponse(
+                self.body, final_url, headers={"Content-Type": "text/html"})):
+            with self.assertRaises(core.InstallError) as caught:
+                core.checked_download(requested_url, self.digest, self.target)
+        for token in ("private-request", "private-request-fragment",
+                      "private-response", "private-response-fragment"):
+            self.assertNotIn(token, str(caught.exception))
         self.assertFalse(self.target.exists())
         self.assertEqual(list(self.target.parent.iterdir()), [])
 
@@ -350,6 +441,19 @@ class OwnershipTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_actual_failed_process_retains_log_and_output(self):
+        with tempfile.TemporaryDirectory() as task_dir:
+            base = Path(task_dir)
+            log = base / "owned-prefix/logs/openfoam-Allwmake.log"
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(core.InstallError, "Command failed.*see") as caught:
+                    core.run([sys.executable, "-c",
+                              "import sys; print('build failure marker', flush=True); sys.exit(1)"],
+                             cwd=base, log=log)
+            self.assertIn(str(log), str(caught.exception))
+            self.assertTrue(log.parent.is_dir())
+            self.assertIn("build failure marker", log.read_text(encoding="utf-8"))
+
     def test_clean_environment_discards_inherited_abis_and_injection(self):
         contaminated = {"HOME": "/home/user", "USER": "user", "DISPLAY": ":0",
                         "WM_PROJECT_DIR": "/old/OpenFOAM-9", "LD_LIBRARY_PATH": "/old/lib",
