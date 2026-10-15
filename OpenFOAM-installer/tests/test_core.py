@@ -300,11 +300,15 @@ class ArchiveTests(unittest.TestCase):
         member.type = tarfile.SYMTYPE
         member.linkname = "file\0tail"
         with mock.patch.object(core.tarfile, "open") as archive_open, \
-                mock.patch.object(core.posixpath, "normpath") as normalize:
+                mock.patch.object(core.posixpath, "normpath",
+                                  wraps=core.posixpath.normpath) as normalize:
             archive_open.return_value.__enter__.return_value.getmembers.return_value = [member]
             with self.assertRaisesRegex(core.InstallError, "Unsafe archive link"):
                 core.safe_extract_tar(self.archive, self.target, "root")
-            normalize.assert_not_called()
+            # From Python 3.12 on shutil.rmtree normalizes its own paths, so the
+            # check is that the link target never reached normpath, not "no call".
+            self.assertFalse(any("\0" in str(arg) for call in normalize.call_args_list
+                                 for arg in call.args))
         self.assertFalse(self.target.exists())
         self.assertEqual(list(self.base.glob(".extract-*")), [])
 
@@ -387,6 +391,13 @@ class OwnershipTests(unittest.TestCase):
             core.claim_prefix(self.prefix, "source-pin")
         self.assertEqual(list(self.prefix.iterdir()), [sentinel])
 
+    def test_an_empty_prefix_is_claimed_like_an_absent_one(self):
+        # An administrator creates the folder of an installation for all users.
+        self.prefix.mkdir()
+        core.claim_prefix(self.prefix, "source-pin")
+        marker = self.prefix / ".sediment-installer.json"
+        self.assertEqual(json.loads(marker.read_text()), {"identity": "source-pin"})
+
     def test_changed_identity_is_rejected(self):
         core.claim_prefix(self.prefix, "old-pin")
         with self.assertRaisesRegex(core.InstallError, "source pin changed"):
@@ -463,7 +474,7 @@ class CommandTests(unittest.TestCase):
         with mock.patch.dict(os.environ, contaminated, clear=True):
             clean = core.clean_environment()
         self.assertEqual(clean["HOME"], "/home/user")
-        self.assertEqual(clean["PATH"], "/usr/local/bin:/usr/bin:/bin")
+        self.assertEqual(clean["PATH"], "/usr/bin:/bin:/usr/local/bin")
         self.assertEqual(clean["HTTPS_PROXY"], "https://proxy.invalid")
         for key in ("WM_PROJECT_DIR", "LD_LIBRARY_PATH", "PYTHONPATH", "LD_PRELOAD",
                     "BASH_ENV", "QT_PLUGIN_PATH"):
